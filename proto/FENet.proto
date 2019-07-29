@@ -1,0 +1,11 @@
+[proto]
+fenet_lay=str_list
+fenet_drop=str_list
+fenet_use_laynorm_inp=bool
+fenet_use_batchnorm_inp=bool
+fenet_use_batchnorm=bool_list
+fenet_use_laynorm=bool_list
+fenet_act=str_list
+fenet_size_fft=int(128,512)
+fenet_n_filter_banks=int(20,64)
+fenet_sample_rate=int(8000,16000)

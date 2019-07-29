@@ -36,31 +36,34 @@ def act_fun(act_type):
 
  if act_type=="relu":
     return nn.ReLU()
-            
+
  if act_type=="tanh":
     return nn.Tanh()
-            
+
  if act_type=="sigmoid":
     return nn.Sigmoid()
-           
+
  if act_type=="leaky_relu":
     return nn.LeakyReLU(0.2)
-            
+
  if act_type=="elu":
     return nn.ELU()
-                     
+
  if act_type=="softmax":
     return nn.LogSoftmax(dim=1)
-        
+
  if act_type=="linear":
      return nn.LeakyReLU(1) # initializzed like this, but not used in forward!
+
+ if act_type=="softplus":
+     return nn.Softplus()
 
 
 
 class MLP(nn.Module):
     def __init__(self, options,inp_dim):
         super(MLP, self).__init__()
-        
+
         self.input_dim=inp_dim
         self.dnn_lay=list(map(int, options['dnn_lay'].split(',')))
         self.dnn_drop=list(map(float, options['dnn_drop'].split(','))) 
@@ -69,8 +72,8 @@ class MLP(nn.Module):
         self.dnn_use_laynorm_inp=strtobool(options['dnn_use_laynorm_inp'])
         self.dnn_use_batchnorm_inp=strtobool(options['dnn_use_batchnorm_inp'])
         self.dnn_act=options['dnn_act'].split(',')
-        
-       
+
+
         self.wx  = nn.ModuleList([])
         self.bn  = nn.ModuleList([])
         self.ln  = nn.ModuleList([])
@@ -1706,4 +1709,251 @@ class SRU(nn.Module):
             h0 = h0.cuda()
         output, hn = self.sru(x, c0=h0)
         return output
+
+
+
+
+class FENet(nn.Module):
+
+    def __init__(self, options,inp_dim):
+        super(FENet, self).__init__()
+
+        self.input_dim=inp_dim
+        print('inp_dim=', inp_dim)
+        self.fenet_lay=list(map(int, options['fenet_lay'].split(',')))
+        self.fenet_drop=list(map(float, options['fenet_drop'].split(','))) 
+        self.fenet_use_batchnorm=list(map(strtobool, options['fenet_use_batchnorm'].split(',')))
+        self.fenet_use_laynorm=list(map(strtobool, options['fenet_use_laynorm'].split(','))) 
+        self.fenet_use_laynorm_inp=strtobool(options['fenet_use_laynorm_inp'])
+        self.fenet_use_batchnorm_inp=strtobool(options['fenet_use_batchnorm_inp'])
+        self.fenet_act=options['fenet_act'].split(',')
+
+        self.fenet_size_fft=int(options['fenet_size_fft'])
+        self.fenet_n_filter_banks=int(options['fenet_n_filter_banks'])
+        self.fenet_sample_rate=int(options['fenet_sample_rate'])
+
+        self.wx  = nn.ModuleList([])
+        self.bn  = nn.ModuleList([])
+        self.ln  = nn.ModuleList([])
+        self.act = nn.ModuleList([])
+        self.drop = nn.ModuleList([])
+
+
+        # input layer normalization
+        if self.fenet_use_laynorm_inp:
+           self.ln0=LayerNorm(self.input_dim)
+
+        # input batch normalization    
+        if self.fenet_use_batchnorm_inp:
+           self.bn0=nn.BatchNorm1d(self.input_dim,momentum=0.05)
+
+
+        self.N_fenet_lay=len(self.fenet_lay)
+
+        current_input=self.input_dim
+
+        # Initialization of hidden layers
+
+        # Ignore the layers except but first layer
+#        for i in range(self.N_fenet_lay):
+
+        # dropout
+        self.drop.append(nn.Dropout(p=self.fenet_drop[0]))
+
+        # activation
+        self.act.append(act_fun(self.fenet_act[0]))
+
+
+        add_bias=True
+
+        # layer norm initialization
+        self.ln.append(LayerNorm(self.fenet_lay[0]))
+        self.bn.append(nn.BatchNorm1d(self.fenet_lay[0],momentum=0.05))
+
+        if self.fenet_use_laynorm[0] or self.fenet_use_batchnorm[0]:
+           add_bias=False
+
+
+        # Linear operations
+        #self.wx.append(nn.Linear(current_input, self.fenet_lay[i],bias=add_bias))
+
+        # weight initialization
+        #self.wx[i].weight = torch.nn.Parameter(torch.Tensor(self.fenet_lay[i],current_input).uniform_(-np.sqrt(0.01/(current_input+self.fenet_lay[i])),np.sqrt(0.01/(current_input+self.fenet_lay[i]))))
+        #self.wx[i].bias = torch.nn.Parameter(torch.zeros(self.fenet_lay[i]))
+
+        self.wx.append(FBNet(inp_dim, self.fenet_n_filter_banks, self.fenet_size_fft, self.fenet_sample_rate))
+
+        self.out_dim=self.fenet_lay[0]
+
+    def forward(self, x):
+
+      #print('x.shape=', x.shape)
+      # Applying Layer/Batch Norm
+      if bool(self.fenet_use_laynorm_inp):
+        x=self.ln0((x))
+
+      #print('x.shape=', x.shape)
+      if bool(self.fenet_use_batchnorm_inp):
+
+        x=self.bn0((x))
+
+      #print('x.shape=', x.shape)
+      for i in range(self.N_fenet_lay):
+
+          if self.fenet_use_laynorm[i] and not(self.fenet_use_batchnorm[i]):
+           x = self.drop[i](self.act[i](self.ln[i](self.wx[i](x))))
+
+          if self.fenet_use_batchnorm[i] and not(self.fenet_use_laynorm[i]):
+           x = self.drop[i](self.act[i](self.bn[i](self.wx[i](x))))
+
+          if self.fenet_use_batchnorm[i]==True and self.fenet_use_laynorm[i]==True:
+           x = self.drop[i](self.act[i](self.bn[i](self.ln[i](self.wx[i](x)))))
+
+          if self.fenet_use_batchnorm[i]==False and self.fenet_use_laynorm[i]==False:
+           x = self.drop[i](self.act[i](self.wx[i](x)))
+
+
+      return x
+
+
+class FBNet(nn.Module):
+    """Filter-bank computation
+    Parameters
+    ----------
+    nfilt : `int`
+        Length of filter
+    n_frames : `int`
+        Number of consecutive frames (=cw_left + cw_right +1)
+    nfft : `int`
+        Length of FFT
+    sample_rate : `int`, optional
+        Sample rate. Defaults to 16000.
+    Usage
+    -----
+
+    Reference
+    ---------
+    MULTI-GEOMETRY SPATIAL ACOUSTIC MODELING FOR DISTANT SPEECH RECOGNITION, Kenichi Kumatani
+    """
+
+    #@staticmethod
+    def hz2mel(self, hz):
+        return 2595 * np.log10(1 + hz / 700)
+
+    #@staticmethod
+    def mel2hz(self, mel):
+        return 700 * (10 ** (mel / 2595) - 1)
+
+
+    def __init__(self, inp_dim, nfilt, nfft,
+                 sample_rate=16000, min_low_hz=0, max_high_hz=0):
+        """Compute a Mel-filterbank. The filters are stored in the rows, the columns correspond
+        to fft bins. The filters are returned as an array of size nfilt * (nfft/2 + 1)
+        :param nfilt: the number of filters in the filterbank, default 20.
+        :param nfft: the FFT size. Default is 512.
+        :param sample_rate: the sample rate of the signal we are working with, in Hz. Affects mel spacing.
+        :param min_low_hz: lowest band edge of mel filters, default 0 Hz
+        :param max_high_hz: highest band edge of mel filters, default sample_rate/2
+        :returns: A numpy array of size nfilt * (nfft/2 + 1) containing filterbank. Each row holds 1 filter.
+        """
+
+        super(FBNet,self).__init__()
+
+        self.nfilt = nfilt
+        self.nfft = nfft
+        print('self.nfilt=', self.nfilt)
+
+        if max_high_hz==0:
+            max_high_hz=sample_rate/2
+
+        self.sample_rate = sample_rate
+        self.min_low_hz = min_low_hz
+        self.max_high_hz = max_high_hz
+        self.bin_width = sample_rate / nfft
+        self.num_fft_bins = nfft // 2
+        self.nframes = inp_dim // self.num_fft_bins
+        print('self.num_fft_bins=', self.num_fft_bins)
+        print('self.nframes=', self.nframes)
+
+        # compute points evenly spaced in mels
+        self.lowmel_ = self.hz2mel(min_low_hz)
+        highmel = self.hz2mel(max_high_hz)
+        mel_freq_delta = torch.zeros(self.nfilt)
+        mel_freq_delta += (highmel - self.lowmel_) / (nfilt+1)
+        self.fft_bin_width = sample_rate / nfft;
+        #print ('lowmel_=', self.lowmel_)
+        #print ('highmel=', highmel)
+        #print ('mel_freq_delta._shape=', mel_freq_delta.shape)
+        #print ('mel_freq_delta=', mel_freq_delta)
+        #print ('self.fft_bin_width=', self.fft_bin_width)
+
+        #center_freqs_ = np.floor(nfilt)
+        bins_weight = torch.zeros(self.num_fft_bins +1, self.nfilt)
+
+        for bin in range(0,self.nfilt):
+            left_mel = self.lowmel_ + bin * mel_freq_delta[bin]
+            center_mel = self.lowmel_ + (bin + 1) * mel_freq_delta[bin]
+            right_mel = self.lowmel_ + (bin + 2) * mel_freq_delta[bin]
+            #print ('bin=', bin)
+            #print ('\tleft_mel=', left_mel)
+            #print ('\tcenter_mel=', center_mel)
+            #print ('\tright_mel=', right_mel)
+
+            #center_freqs_[bin] = self.mel2hz(center_mel)
+            #this_bin = np.zeros(self.num_fft_bins);
+            first_index = -1
+            last_index = -1
+
+            for i in range (0, self.num_fft_bins):
+                freq = self.fft_bin_width * i  # Center frequency of this fft bin.
+                mel = self.hz2mel(freq)
+                #print ('\tmel=', mel)
+
+                if mel > left_mel and mel < right_mel:
+                    if mel <= center_mel:
+                        weight = (mel - left_mel) / (center_mel - left_mel)
+                    else:
+                        weight = (right_mel-mel) / (right_mel-center_mel)
+                    #print ('\tweight=', weight)
+
+                    #this_bin[i] = weight
+                    bins_weight[i+1, bin] = weight
+
+                    if first_index == -1:
+                        first_index = i
+                    last_index = i
+                elif mel > right_mel :
+                    break;
+
+            #print ('\tfirst_index=', first_index)
+            #print ('\tlast index=', last_index)
+            #if (first_index == -1 or first_index > last_index):
+                #print ('You may have set --num-mel-bins too large.')
+
+            #print ('\tweight=', bins_weight[bin, :])
+
+        self.bins_weight_ = nn.Parameter(torch.Tensor(bins_weight))
+
+
+    def forward(self, spectrograms):
+        """
+        Parameters
+        ----------
+        spectrograms : `torch.Tensor` (batch_size, 1, n_samples)
+            Batch of spectrograms.
+        Returns
+        -------
+        features : `torch.Tensor` (batch_size, nfilt, n_samples_out)
+            Batch of sinc filters activations.
+        """
+
+        #print ('spectrograms.shape=', spectrograms.shape)
+        #self.bins_weight_ = self.bins_weight_.to(spectrograms.device)
+
+        #feat = torch.matmul(spectrograms, self.bins_weight_)
+        spect = spectrograms.view(-1, self.nframes, self.num_fft_bins+1)
+        feat = torch.matmul(spect, self.bins_weight_)
+        feat = feat.view(-1, self.nframes*self.nfilt)
+
+        return feat
 
